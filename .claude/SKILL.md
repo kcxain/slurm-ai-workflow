@@ -19,10 +19,10 @@
 
 ```
 需要运行 GPU 代码？
-├─ 是短时间验证（< 10 分钟，单函数/环境检查）
-│   └─ 用 srun（阻塞）→ 见「快速测试」
-└─ 是完整训练/长时间任务
-    └─ 用 sbatch（异步）→ 见「异步作业循环」
+├─ 短时间验证（< 10 分钟，单函数/环境检查）
+│   └─ srun（阻塞）→ 见「快速测试」
+└─ 完整训练/长时间任务
+    └─ sbatch（异步）→ 见「异步作业循环」
 ```
 
 ---
@@ -62,42 +62,64 @@ while squeue -j $JOB_ID -h 2>/dev/null | grep -q .; do
 done
 ```
 
-等待上限：2 小时。超时后停止并报告，等待用户决定。
+等待上限：`TIME_BUDGET + 600` 秒（训练预算 + 10 分钟启动余量）。超时后 `scancel $JOB_ID` 并记为 crash。
 
 ### Step 3：读取日志
 
 ```bash
-LOG="logs/slurm-${JOB_ID}.out"
-cat $LOG
+cat logs/slurm-${JOB_ID}.out
 ```
 
-若日志文件不存在：先用 `sacct -j $JOB_ID --format=State,ExitCode` 确认作业状态。
+若日志文件不存在，先用 `sacct -j $JOB_ID --format=State,ExitCode` 确认作业状态。
 
 ### Step 4：判断结果
 
 | 日志信号 | 判断 | 下一步 |
 |----------|------|--------|
-| 末尾含 `JOB COMPLETED SUCCESSFULLY` 或 exit 0 | 成功 | 报告结果，提取关键指标 |
+| 末尾含 `JOB COMPLETED SUCCESSFULLY` | 成功 | 提取指标，决定 keep/discard |
 | Python `Traceback` | 代码错误 | 定位源文件，修复，重新提交 |
-| `CUDA out of memory` | 显存不足 | 减小 batch size（修改配置），重新提交 |
-| `DUE TO TIME LIMIT` | 超时 | **不自动修改**，告知用户增大 `--time` |
-| `slurmstepd: error` / `Killed` | OOM kill | **不自动修改**，告知用户增大 `--mem` |
+| `CUDA out of memory` | 显存不足 | 减小 batch size，重新提交 |
+| `DUE TO TIME LIMIT` | 超时 | **不自动修改**，告知用户 |
+| `slurmstepd: error` / `Killed` | OOM kill | **不自动修改**，告知用户 |
 | 日志为空 | 刚启动 | 等待 10 秒后重新读取 |
 
-### Step 5：修复并重试
+---
 
-1. 修改代码前，用 `git diff` 确认当前状态
-2. 修改后简要告知用户改了什么
-3. 回到 Step 1 重新提交
-4. **最多自动重试 5 次**；超过后总结失败历史，等待用户指令
+## AutoResearch 循环
+
+若项目包含 `program.md`，按其中的实验循环执行（参考 autoresearch 模式）：
+
+```
+读取 program.md
+    ↓
+Setup（git branch、数据检查、results.tsv）
+    ↓
+LOOP（无限）:
+  提出实验想法（一次只改一件事）
+    ↓
+  修改 train.py → git commit
+    ↓
+  sbatch run.sh → 等待 → 读日志
+    ↓
+  解析 val_bpb
+    ↓
+  改善 → keep，记录 results.tsv
+  持平/变差 → discard，git reset HEAD~1
+  crash → 快速修复或跳过，git reset HEAD~1
+    ↓
+  回到 LOOP（永不主动停止）
+```
+
+详细规则见 `program.md`。
 
 ---
 
 ## 禁止行为
 
 - **不要**在未经用户确认的情况下修改 `#SBATCH` 资源参数（`--time`、`--mem`、`--gres`）
-- **不要**在计算节点上尝试运行 Claude 或访问外部 API（无外网）
-- **不要**在日志读取失败后反复 `cat` 同一文件——先用 `sacct` 确认作业状态
+- **不要**修改 `prepare.py`（评估逻辑固定）
+- **不要**在计算节点上尝试访问外部 API（无外网）
+- **不要**在日志读取失败后反复 `cat` 同一文件——先用 `sacct` 确认状态
 
 ---
 
@@ -107,22 +129,3 @@ cat $LOG
 |------|------|
 | `/slurm-run [script] [args]` | 完整的 sbatch 提交 + 等待 + 日志 + 自动修复循环 |
 | `/slurm-test [file_or_cmd]` | srun 快速阻塞测试 |
-
----
-
-## 典型完整流程
-
-```
-用户："让 train.py 在 A100 上跑通"
-  │
-  ├─ /slurm-test "import torch; print(torch.cuda.is_available())"
-  │     确认 GPU 环境正常
-  │
-  ├─ /slurm-run scripts/run.sh --config configs/a100.yaml
-  │     提交 → 等待 → 读日志
-  │     ├─ 失败（OOM）→ 修改 batch_size → 重新提交
-  │     ├─ 失败（Traceback）→ 修复代码 → 重新提交
-  │     └─ 成功 → 报告 loss/accuracy，git commit
-  │
-  └─ 完成
-```
