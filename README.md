@@ -12,10 +12,11 @@ The idea: give an AI agent a small but real LLM training setup and let it experi
 
 ## How it works
 
-The repo is deliberately kept small and only really has three files that matter:
+The repo is deliberately kept small and only really has four files that matter:
 
 - **`prepare.py`** — fixed constants, one-time data prep (downloads training data, trains a BPE tokenizer), and runtime utilities (dataloader, evaluation). Not modified.
 - **`train.py`** — the single file the agent edits. Contains the full GPT model, optimizer (Muon + AdamW), and training loop. Everything is fair game: architecture, hyperparameters, optimizer, batch size, etc. **This file is edited and iterated on by the agent**.
+- **`submit.sh`** — Slurm batch script. The agent submits this via `sbatch`, passing partition and GPU count as command-line overrides. Stdout and stderr go to `ret-<job_id>.out` and `ret-<job_id>.err`.
 - **`program.md`** — baseline instructions for one agent. Point your agent here and let it go. **This file is edited and iterated on by the human**.
 
 By design, training runs for a **fixed 5-minute time budget** (wall clock, excluding startup/compilation), regardless of the details of your compute. The metric is **val_bpb** (validation bits per byte) — lower is better, and vocab-size-independent so architectural changes are fairly compared.
@@ -24,10 +25,11 @@ If you are new to neural networks, this ["Dummy's Guide"](https://x.com/hooeem/s
 
 ## Quick start
 
-**Requirements:** A single NVIDIA GPU (tested on H100), Python 3.10+, [uv](https://docs.astral.sh/uv/).
+**Requirements:** A Slurm cluster with at least one NVIDIA GPU (tested on H100), Python 3.10+, [uv](https://docs.astral.sh/uv/).
+
+Run the following on the **login node**:
 
 ```bash
-
 # 1. Install uv project manager (if you don't already have it)
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
@@ -35,13 +37,22 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 uv sync
 
 # 3. Download data and train tokenizer (one-time, ~2 min)
+#    Must run on the login node — compute nodes have no internet access
 uv run prepare.py
 
-# 4. Manually run a single training experiment (~5 min)
-uv run train.py
+# 4. Check available GPU partitions
+slurm-gpu-info
+
+# 5. Submit a test run to verify the setup (~5 min training + queue wait)
+sbatch --partition=<partition> --gres=gpu:<N> submit.sh
+# → Submitted batch job 12345
+
+# 6. Poll until done, then check results
+squeue -j 12345 -h                              # empty = finished
+grep "^val_bpb:" ret-12345.out                  # key metric
 ```
 
-If the above commands all work ok, your setup is working and you can go into autonomous research mode.
+If you see a `val_bpb` value in the output, your setup is working and you can go into autonomous research mode.
 
 ## Running the agent
 
@@ -58,6 +69,7 @@ The `program.md` file is essentially a super lightweight "skill".
 ```
 prepare.py      — constants, data prep + runtime utilities (do not modify)
 train.py        — model, optimizer, training loop (agent modifies this)
+submit.sh       — Slurm batch script (agent submits this, not modify)
 program.md      — agent instructions
 pyproject.toml  — dependencies
 ```
